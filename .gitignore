@@ -1,0 +1,5 @@
+node_modules/
+.workflow/
+*.log
+.env
+.env.local
