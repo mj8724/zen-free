@@ -131,6 +131,22 @@ test("classify: a 200 whose error envelope says upstream failed does move", asyn
   assert.equal(await verdict.response.text(), body, "the caller still reads the upstream's words");
 });
 
+test("classify: a 200 carrying some other complaint does not spend an address", async () => {
+  for (const message of ["model not found", "invalid request", "unsupported tool"]) {
+    const body = JSON.stringify({ error: { message } });
+    const verdict = await classifyResponse(reply(200, body));
+    assert.equal(verdict.switch, false, `${message} is not something another address fixes`);
+    assert.equal(await verdict.response.text(), body);
+  }
+});
+
+test("classify: the plugin's own 403 is not a reason to move even at status 200", async () => {
+  const body = JSON.stringify({ error: { type: "FreeTierError", message: "can only be used from within OpenCode" } });
+  const verdict = await classifyResponse(reply(200, body));
+  assert.equal(verdict.switch, false);
+  assert.equal(await verdict.response.text(), body);
+});
+
 test("classify: a model writing about upstream errors in an answer does not move", async () => {
   const body = JSON.stringify({ choices: [{ message: { content: "an upstream error is what we log" } }] });
   const verdict = await classifyResponse(reply(200, body));

@@ -46,7 +46,7 @@ magpie plugin options opencode-zen-free-resin '这里是下面的 JSON'
     "account": "zen-free",                              // Account 前缀，决定 IP 的归属身份
     "addresses": 8,                                     // 可用出口 IP 的上限（1-1000）
     "transport": "forward",                             // forward 或 reverse
-    "attempts": 3                                       // 每次请求最多额外重试几次
+    "attempts": 3                                       // 每次请求最多额外重试几次（0-10）
   }
 }
 ```
@@ -80,7 +80,10 @@ magpie plugin options opencode-zen-free-resin '这里是下面的 JSON'
 
 1. 优先换成**没用过的** Account —— 保证每次都花掉一个新 IP；
 2. 全都用过之后，换成**实测最快**的那个（按响应头到达时间 TTFB 排序，不掺生成耗时）；
-3. 全都换过一遍之后，换成**最久没被换掉**的那个，并释放它的租约，让它变成一个新 IP。
+3. 全都换过一遍之后，换成**最久没被换掉**的那个，并释放它的租约让它重新绑定。
+
+注意第 3 步：释放租约只是解除绑定，Resin 会重新挑一次节点，**可能又挑回同一个 IP**（如果它仍是最快的）。
+所以真正避免用完的关键是 `addresses` 给够（你说有 300 个，那就填 300），而不是靠释放租约。
 
 换 IP 对 agent 是透明的：插件在把响应交出去之前就重试完了。`attempts` 用完还没成功，
 就把上游自己的报错原样交回。

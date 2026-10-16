@@ -94,6 +94,10 @@ function exitAddresses(raw) {
     throw new Error("resin.account may only hold letters, digits, dot, dash and underscore");
   }
   const platform = raw.platform ?? "Default";
+  const attempts = raw.attempts ?? DEFAULT_ATTEMPTS;
+  if (!Number.isInteger(attempts) || attempts < 0 || attempts > 10) {
+    throw new Error(`resin.attempts must be a whole number from 0 to 10, got ${raw.attempts}`);
+  }
   // Checked after the options themselves, so a bad option is reported as
   // itself whatever the runtime is.
   requireForwardSupport(transport);
@@ -102,7 +106,7 @@ function exitAddresses(raw) {
     token,
     platform,
     transport,
-    attempts: raw.attempts ?? DEFAULT_ATTEMPTS,
+    attempts,
     pool: new IPPool({ accounts: accountNames(prefix, addresses) }),
     // Without the dashboard token a spent address keeps its lease, so reusing
     // its Account yields the same refused address. Rotation itself still works.

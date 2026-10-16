@@ -349,4 +349,8 @@ test("a Resin URL that cannot be used stops the plugin instead of going direct i
     () => load({ url: `${zen.origin}/t`, account: "bad name" }, zen.origin),
     /resin.account may only hold letters, digits, dot, dash and underscore/,
   );
+  await assert.rejects(
+    () => load({ url: `${zen.origin}/t`, attempts: -1 }, zen.origin),
+    /resin.attempts must be a whole number from 0 to 10/,
+  );
 });

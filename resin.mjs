@@ -106,7 +106,9 @@ function match(patterns, text) {
 
 // A 200 that is really a failure. Only a documented error envelope counts: a
 // model may write "upstream error" in an answer, and an answer must never
-// move traffic to another address.
+// move traffic to another address. Only the wordings listed above count too,
+// so a 200 carrying some other complaint is handed back rather than spending
+// an address on something another address cannot fix.
 function structuredError(text) {
   let parsed;
   try {
@@ -121,7 +123,9 @@ function structuredError(text) {
     typeof error === "string"
       ? error
       : [error.message, error.type, error.code].filter(Boolean).join(" ");
-  return match(SWITCH_PATTERNS, message) ?? { kind: "upstream" };
+  if (match(FATAL_PATTERNS, message)) return undefined;
+  const matched = match(SWITCH_PATTERNS, message);
+  return matched ? { kind: matched.kind } : undefined;
 }
 
 async function discard(response) {
