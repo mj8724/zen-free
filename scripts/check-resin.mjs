@@ -6,10 +6,16 @@
 //
 //   bun scripts/check-resin.mjs --url http://host:2260/PROXY_TOKEN \
 //     [--admin-token ADMIN_TOKEN] [--platform Default] [--addresses 3]
+//     [--timeout-ms 120000] [--tries 3]
 //
 // The proxy token is Resin's RESIN_PROXY_TOKEN, which is not the dashboard
 // token. The admin token is optional: without it the leases this creates are
 // left behind for Resin to expire on its own.
+//
+// Give it room. Resin binds a new Account to a node on that Account's first
+// request, and on this deployment that first bind measured 37 seconds. The
+// same deployment also drops a good share of connections outright, so each
+// address is asked several times before it is called a failure.
 import { randomBytes } from "node:crypto";
 import { ResinAdmin, parseResinURL, requireForwardSupport } from "../resin.mjs";
 import { forwardProxyURL } from "../provider.mjs";
@@ -34,6 +40,8 @@ const { endpoint, token } = parseResinURL(args.url);
 const platform = args.platform ?? "Default";
 const addresses = Number(args.addresses ?? 3);
 const prefix = `zfcheck-${randomBytes(4).toString("hex")}`;
+const timeoutMs = Number(args["timeout-ms"] ?? 120000);
+const tries = Number(args.tries ?? 3);
 const adminToken = args["admin-token"];
 const admin = adminToken
   ? new ResinAdmin({
@@ -53,12 +61,13 @@ function check(condition, description) {
 // The address a request left from, as the far end sees it: this is the
 // address Zen would count the request against. A proxy that refuses the
 // tunnel reports it here, with Resin's own reason header, rather than as a
-// status code.
-async function egress(account, target = ECHO) {
+// status code. A connection Resin drops is asked again, because a dropped
+// connection says nothing about the exit address behind it.
+async function once(account, target) {
   try {
     const response = await fetch(target, {
       proxy: forwardProxyURL({ endpoint, token, platform }, account),
-      signal: AbortSignal.timeout(60000),
+      signal: AbortSignal.timeout(timeoutMs),
     });
     const body = (await response.text()).trim();
     return { status: response.status, body, ip: target === ECHO ? body : undefined };
@@ -70,6 +79,15 @@ async function egress(account, target = ECHO) {
       body: `${reason ? `${reason}: ` : ""}${error?.message ?? error}`,
     };
   }
+}
+
+async function egress(account, target = ECHO) {
+  let result = await once(account, target);
+  for (let attempt = 2; attempt <= tries && result.status !== 200; attempt += 1) {
+    console.log(`  ${account}  retrying (${attempt}/${tries}): ${result.body.slice(0, 70)}`);
+    result = await once(account, target);
+  }
+  return result;
 }
 
 const created = [];
@@ -88,7 +106,8 @@ try {
     created.push(account);
     const result = await egress(account);
     seen.push({ account, ...result });
-    console.log(`  ${account}  HTTP ${result.status}  exit ${result.ip ?? "-"}${result.reason ? `  (${result.reason})` : ""}`);
+    const note = result.ip ? "" : `  (${result.body.slice(0, 90)})`;
+    console.log(`  ${account}  HTTP ${result.status}  exit ${result.ip ?? "-"}${note}`);
   }
 
   console.log("");
