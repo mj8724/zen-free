@@ -1,0 +1,15 @@
+{
+  "log": { "level": "info" },
+  "inbounds": [
+    { "type": "http", "tag": "in-0", "listen": "127.0.0.1", "listen_port": 28100 }
+  ],
+  "outbounds": [
+    { "type": "direct", "tag": "direct" }
+  ],
+  "route": {
+    "rules": [
+      { "inbound": ["in-0"], "action": "route", "outbound": "direct" }
+    ],
+    "final": "direct"
+  }
+}
