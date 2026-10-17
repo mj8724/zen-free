@@ -136,8 +136,8 @@ const OWN_SCRIPTS = [
   "https://magpie.test/_magpie/plugin/tok/app.js",
 ];
 
-// Returns a function that fires one error event and reports whether guard.js
-// stopped it from being forwarded.
+// Runs guard.js against a stubbed window and returns a firer per event, each
+// reporting whether guard.js stopped that event from being forwarded.
 function installGuard(scripts = OWN_SCRIPTS, href = PAGE) {
   const registered = [];
   globalThis.location = { href };
@@ -145,53 +145,81 @@ function installGuard(scripts = OWN_SCRIPTS, href = PAGE) {
   globalThis.addEventListener = (type, listener, capture) => registered.push({ type, listener, capture });
   new Function(guardSource)();
 
-  const entry = registered.find((item) => item.type === "error");
-  assert.ok(entry, "guard.js registered no error listener");
-  assert.equal(entry.capture, true, "guard.js must listen in the capture phase to run before the bridge");
+  // The bridge forwards on both of these, so the guard has to sit in front of
+  // both. Capture phase, and registered first, because an error event is
+  // dispatched at the window itself and listeners there run in that order.
+  function firer(type) {
+    const entry = registered.find((item) => item.type === type);
+    assert.ok(entry, `guard.js registered no ${type} listener`);
+    assert.equal(entry.capture, true, `guard.js must listen in the capture phase for ${type}`);
+    return (event) => {
+      let stopped = false;
+      entry.listener({
+        message: "",
+        filename: "",
+        error: undefined,
+        reason: undefined,
+        stopImmediatePropagation() {
+          stopped = true;
+        },
+        ...event,
+      });
+      return stopped;
+    };
+  }
 
-  return (event) => {
-    let stopped = false;
-    entry.listener({
-      message: "",
-      filename: "",
-      error: undefined,
-      stopImmediatePropagation() {
-        stopped = true;
-      },
-      ...event,
-    });
-    return stopped;
-  };
+  return { error: firer("error"), rejection: firer("unhandledrejection") };
 }
 
 test("an injected script's error is not passed off as this page's", () => {
-  const stop = installGuard();
+  const { error } = installGuard();
   // Injected code runs as the frame's own origin, so its message survives; a
   // file magpie serves is cross-origin to that opaque origin and does not.
-  assert.equal(stop({ message: "Uncaught Error: Failed to connect to MetaMask" }), true);
-  assert.equal(stop({ message: "boom", filename: "chrome-extension://abcdef/inpage.js" }), true);
+  assert.equal(error({ message: "Uncaught Error: Failed to connect to MetaMask" }), true);
+  assert.equal(error({ message: "boom", filename: "chrome-extension://abcdef/inpage.js" }), true);
 });
 
 test("this page's own errors are still forwarded", () => {
-  const stop = installGuard();
-  assert.equal(stop({ message: "Script error." }), false, "a sanitized file error is this page's");
-  assert.equal(stop({ message: "" }), false, "an empty message is this page's");
+  const { error } = installGuard();
+  assert.equal(error({ message: "Script error." }), false, "a sanitized file error is this page's");
+  assert.equal(error({ message: "" }), false, "an empty message is this page's");
   assert.equal(
-    stop({ message: "boom", filename: "https://magpie.test/_magpie/plugin/tok/app.js" }),
+    error({ message: "boom", filename: "https://magpie.test/_magpie/plugin/tok/app.js" }),
     false,
     "an error naming a declared script is this page's",
   );
   assert.equal(
-    stop({ message: "boom", error: { fileName: "https://magpie.test/_magpie/plugin/tok/guard.js" } }),
+    error({ message: "boom", error: { fileName: "https://magpie.test/_magpie/plugin/tok/guard.js" } }),
     false,
     "the error object's fileName counts too",
   );
 });
 
 test("an error that cannot name a declared script is not this page's", () => {
-  const stop = installGuard();
-  assert.equal(stop({ message: "boom", filename: "weird source" }), true);
-  assert.equal(stop({ message: "boom", filename: "https://elsewhere.test/x.js" }), true);
+  const { error } = installGuard();
+  assert.equal(error({ message: "boom", filename: "weird source" }), true);
+  assert.equal(error({ message: "boom", filename: "https://elsewhere.test/x.js" }), true);
+});
+
+// MetaMask reaches the bridge through the rejection path, not the error one,
+// and it does so with either an Error or a bare string. Measured in the same
+// sandboxed frame magpie uses: a rejection raised by the page's own code does
+// not raise this event at all, so an unattributable one here is injected.
+test("an injected rejection is not passed off as this page's", () => {
+  const { rejection } = installGuard();
+  assert.equal(rejection({ reason: new Error("Failed to connect to MetaMask") }), true);
+  assert.equal(rejection({ reason: "Failed to connect to MetaMask" }), true);
+  // a stack that leads elsewhere is no more this page's than no stack at all
+  const elsewhere = new Error("boom");
+  elsewhere.stack = "Error: boom\n    at https://elsewhere.test/x.js:1:1";
+  assert.equal(rejection({ reason: elsewhere }), true);
+});
+
+test("a rejection that names one of this page's scripts is still forwarded", () => {
+  const { rejection } = installGuard();
+  const owned = new Error("boom in our own code");
+  owned.stack = "Error: boom\n    at https://magpie.test/_magpie/plugin/tok/app.js:42:7";
+  assert.equal(rejection({ reason: owned }), false);
 });
 
 // ------------------------------------------------------- the save path, run

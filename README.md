@@ -47,7 +47,7 @@ Zen 请求
 1. **保存是覆盖在已有配置之上**：界面把它认识的字段写进去，它不认识的键原样保留，所以界面和命令行可以混着用。
 2. **界面不会去抓订阅**：页面的安全策略是 `connect-src 'none'`，它没有任何网络能力 —— 它只把链接存进配置，真正的抓取由插件在 Bun 里做。所以填完要**重载插件**（或重新开关一次插件）才开始工作。
 3. **一个节点都没填就是直连，而直连必然 403**：Zen 免费层对不像 OpenCode 发来的请求一律回 `403 FreeTierError`。界面会在这种情况下标红。还有一处小心：只填了池子的其它设置、却一个节点都没有时，界面会**丢掉 pool 配置而不保存它** —— 因为 `pool: {}` 是真值，留着它插件会拒绝加载（`no usable node`），连 Resin 降级都没了。
-4. **浏览器扩展弄不坏这个页面**：页面跑在沙箱 iframe 里，而 magpie 的 bridge 会把 frame 里**任何**报错都当成页面自己出错，然后把页面换成「此页面已停止工作」。钱包扩展（比如 MetaMask）会往每个 frame 注入脚本，它在沙箱 frame 里抛错就会触发这条。`page/guard.js` 只在报错确实来自本页声明的脚本时才放行 —— 判据不是猜的：沙箱 frame 是不透明源，magpie 提供的**文件**对它都是跨源，浏览器会把它们的报错洗成 `Script error.`；**注入的代码**跑在 frame 自己的源上，报错会保留原文。所以一个保留着消息、又没有来源的报错只可能来自注入的代码。
+4. **浏览器扩展弄不坏这个页面**：magpie 的 bridge 有**两条**转发路径 —— `error` 和 `unhandledrejection` —— 命中任一条，窗口就会把页面换成「此页面已停止工作」。钱包扩展（比如 MetaMask）会往每个 frame 注入脚本，它在沙箱 frame 里抛错**或者**产生未处理的 rejection 都会触发（MetaMask 走的是后者：实测四种注入方式里，只盖住 `throw` 的那一版对它无效）。`page/guard.js` 只在报错确实来自本页声明的脚本时才放行 —— 判据不是猜的：沙箱 frame 是不透明源，magpie 提供的**文件**对它都是跨源，浏览器会把它们的报错洗成 `Script error.`；**注入的代码**跑在 frame 自己的源上，报错会保留原文。所以一个保留着消息、又没有来源的报错只可能来自注入的代码。rejection 没有来源，就用 reason 的 stack 归因 —— 而且在这个沙箱里**本页自己的 rejection 根本不会触发这个事件**（`Promise.reject(Error)`、`Promise.reject(字符串)`、executor、async throw 四种都实测无事件），所以能到达 bridge 的 rejection 只可能是注入的。
 
 > 为什么选项不放在 magpie 那一块「插件选项」里：magpie 给 provider 插件的选项界面（`auth.options`，见 `internal/plugin/providers.go` 的 `Option`）**只有开关**——`Default bool`，UI 提交的是 `{provider, key, on}`。一个订阅链接放不进去。所以这个插件自带一个页面。
 
