@@ -60,6 +60,8 @@ magpie plugin options opencode-zen-free-resin '{
 | `manual[]` | 手填：同样的行格式，或直接给 sing-box outbound 对象 |
 | `core.binary` | sing-box 路径；不给就找 PATH，再不给就自动下载 |
 | `core.portBase` | 本地端口起始（第 i 个节点用 `portBase + i`） |
+| `core.download` | 设为 `false` 则禁止自动下载内核 |
+| `core.stateDir` / `statePath` | 内核与池状态（节点表、延迟、出口 IP）的存放位置，默认在 magpie 配置目录下 |
 | `maxNodes` | 最多托管多少节点（1-1000，默认 300） |
 | `distinctIps` | 按**真实出口 IP** 去重排序（默认开） |
 | `allowUnpinnedNodes` | 见下面「证书 pin」 |
