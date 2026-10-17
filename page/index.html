@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Proxy pool</title>
+<link rel="stylesheet" href="style.css">
+<!-- Served beside every page's own files; must come before app.js, which
+     only uses the `magpie` object it installs. Scripts have to be files:
+     the page's policy allows no inline script and no network. -->
+<script src="_magpie/bridge.js"></script>
+<script src="app.js" defer></script>
+</head>
+<body>
+<h1>代理池</h1>
+<p class="sub">OpenCode Zen Free 的出口 IP 来自这里。改完点保存，插件会重新加载并使用新的配置。</p>
+
+<div id="notice"></div>
+
+<form id="form" autocomplete="off"></form>
+
+<div class="bar">
+  <button type="button" id="save" class="primary">保存</button>
+  <button type="button" id="revert">放弃修改</button>
+  <span class="status" id="status"></span>
+</div>
+</body>
+</html>

@@ -26,7 +26,32 @@ Zen 请求
 - 直连 `github.com/.../releases/download/...` 在受限网络会被挡，所以走的是 **GitHub API 的 asset 端点**，并且**支持断点续传**（下载会中断，实测约 34 KB/s，32MB 的包）
 - 想省掉这次下载：自己装好后用 `core.binary` 指过去，或关掉自动安装（`core.download: false`）
 
-## 配置
+## 在 magpie 界面里配置（推荐）
+
+装好之后，magpie 的**设置 → 插件**里会多出一个**属于这个插件自己的页面**（侧边栏「插件」组里的**代理池**标签）。订阅链接、手填节点、内核、延迟测试、Resin 降级、高级项都在那里填，改完点保存 —— 不需要命令行。
+
+界面分 6 组：
+
+| 组 | 管什么 |
+|---|---|
+| 出口源 | 订阅链接、手填节点 |
+| sing-box 内核 | 内核路径、是否自动下载、端口起点、状态目录 |
+| 池子与换 IP | 节点上限、出口 IP 去重、证书 pin 取舍、重试次数、后台复查间隔 |
+| 延迟测试 | 两个延迟目标、超时、并发、最少出口 IP 数、复测间隔 |
+| Resin 降级 | 只在没有 pool 时生效 |
+| 高级 | 响应头超时、Zen API 地址等 |
+
+空白项**不会写进配置**，继续用插件自己的默认值，所以想恢复默认只要把那个框清空。默认值显示在输入框的灰色提示里。
+
+三个必须知道的行为：
+
+1. **保存是覆盖在已有配置之上**：界面把它认识的字段写进去，它不认识的键原样保留，所以界面和命令行可以混着用。
+2. **界面不会去抓订阅**：页面的安全策略是 `connect-src 'none'`，它没有任何网络能力 —— 它只把链接存进配置，真正的抓取由插件在 Bun 里做。所以填完要**重载插件**（或重新开关一次插件）才开始工作。
+3. **一个节点都没填就是直连，而直连必然 403**：Zen 免费层对不像 OpenCode 发来的请求一律回 `403 FreeTierError`。界面会在这种情况下标红。还有一处小心：只填了池子的其它设置、却一个节点都没有时，界面会**丢掉 pool 配置而不保存它** —— 因为 `pool: {}` 是真值，留着它插件会拒绝加载（`no usable node`），连 Resin 降级都没了。
+
+> 为什么选项不放在 magpie 那一块「插件选项」里：magpie 给 provider 插件的选项界面（`auth.options`，见 `internal/plugin/providers.go` 的 `Option`）**只有开关**——`Default bool`，UI 提交的是 `{provider, key, on}`。一个订阅链接放不进去。所以这个插件自带一个页面。
+
+## 配置（命令行）
 
 ```sh
 magpie plugin add /path/to/zen-free
@@ -69,6 +94,9 @@ magpie plugin options opencode-zen-free-resin '{
 | `probe.neutralUrls` | 中立延迟目标回退数组，**同时用来解析真实出口 IP** |
 | `probe.zenUrl` | 到 Zen 的真实延迟目标（用 `GET /models`，不耗额度） |
 | `probe.minDistinctIps` | 不同出口 IP 少于这个数就告警 |
+| `probe.activeRefreshMs` | 在用地址的复测间隔（默认 600000，10 分钟，约 6 次/小时） |
+| `probe.staleMs` | 备用地址的复测间隔（默认 3600000，1 小时，约 8 次/小时） |
+| `refreshTickMs` | 后台复查的唤醒间隔（默认 60000）。它只决定「什么时候看一眼」 |
 
 ### 支持哪些协议
 
@@ -150,7 +178,7 @@ magpie plugin options opencode-zen-free-resin '{
 原来的 Resin 后端保留着，作为池子不可用时的降级路径，配置方式不变：
 
 ```jsonc
-{ "resin": { "url": "http://host:2260/<代理令牌>", "adminToken": "<管理令牌>", "platform": "Default", "addresses": 8, "transport": "forward" } }
+{ "resin": { "url": "http://host:2260/<代理令牌>", "adminToken": "<管理令牌>", "platform": "Default", "account": "zen-free", "addresses": 8, "transport": "forward" } }
 ```
 
 `pool` 和 `resin` 同时配置时**优先走 pool**。注意 Resin 有**两个不同的令牌**：`url` 里要的是**代理令牌**（`RESIN_PROXY_TOKEN`），`adminToken` 才是面板令牌。填错会得到 `403 Proxy authentication failed`，所以插件对没有令牌的 `url` 直接报错而不是静默失效。
@@ -160,7 +188,7 @@ magpie plugin options opencode-zen-free-resin '{
 ## 测试
 
 ```sh
-bun test          # 383 个用例
+bun test          # 396 个用例
 node --test       # Node 下 3 个已知失败：Node 的 fetch 多带一个 accept-language 头，是原版就有的运行时差异
 ```
 

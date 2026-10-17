@@ -1,0 +1,128 @@
+/* The page's own sheet. The bridge sets --magpie-bg/--magpie-fg/--magpie-accent
+   and data-theme on <html>, and paints color-scheme, so anything left at
+   `inherit` follows the window's light/dark and its language. Borders and
+   input surfaces use mid-gray at low alpha, which reads correctly on both. */
+
+* { box-sizing: border-box; }
+
+html, body { margin: 0; }
+
+body {
+  padding: 18px 20px 22px;
+  font: 13px/1.55 ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial,
+    "PingFang SC", "Microsoft YaHei", sans-serif;
+  background: var(--magpie-bg, Canvas);
+  color: var(--magpie-fg, CanvasText);
+}
+
+h1 { margin: 0 0 2px; font-size: 16px; font-weight: 600; }
+
+h2 {
+  margin: 0;
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: .01em;
+}
+
+.sub { margin: 0 0 16px; opacity: .65; }
+
+/* A section is a <details> so a long form still opens on the part you want. */
+details.sec {
+  margin: 0 0 12px;
+  border: 1px solid rgba(128, 128, 128, .28);
+  border-radius: 8px;
+  overflow: hidden;
+}
+
+details.sec > summary {
+  padding: 9px 12px;
+  cursor: pointer;
+  user-select: none;
+  background: rgba(128, 128, 128, .07);
+}
+
+details.sec > summary::marker { opacity: .5; }
+
+details.sec > .body { padding: 4px 12px 12px; }
+
+details.sec > .body > .note { margin: 6px 0 2px; opacity: .65; }
+
+.field { padding: 9px 0; border-top: 1px solid rgba(128, 128, 128, .18); }
+.field:first-child { border-top: 0; }
+
+.label { display: block; font-weight: 500; }
+
+.hint { display: block; margin-top: 2px; opacity: .6; }
+
+input[type="text"], input[type="password"], input[type="number"], textarea, select {
+  width: 100%;
+  margin-top: 6px;
+  padding: 6px 8px;
+  border: 1px solid rgba(128, 128, 128, .45);
+  border-radius: 6px;
+  background: rgba(128, 128, 128, .08);
+  color: inherit;
+  font: inherit;
+}
+
+textarea { min-height: 74px; resize: vertical; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+
+input:focus-visible, textarea:focus-visible, select:focus-visible, button:focus-visible {
+  outline: 2px solid var(--magpie-accent, #3b82f6);
+  outline-offset: 1px;
+}
+
+/* A checkbox sits beside its label rather than under it. */
+.field.check { display: flex; align-items: flex-start; gap: 8px; }
+.field.check .label { font-weight: 400; }
+.field.check input[type="checkbox"] { margin: 2px 0 0; flex: none; }
+.field.check .text { flex: 1; }
+
+.bar {
+  position: sticky;
+  bottom: 0;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 4px;
+  padding: 10px 0 0;
+  border-top: 1px solid rgba(128, 128, 128, .28);
+  background: var(--magpie-bg, Canvas);
+}
+
+button {
+  padding: 7px 14px;
+  border: 1px solid rgba(128, 128, 128, .45);
+  border-radius: 6px;
+  background: rgba(128, 128, 128, .1);
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+}
+
+button.primary {
+  border-color: transparent;
+  background: var(--magpie-accent, #3b82f6);
+  color: #fff;
+}
+
+button:disabled { opacity: .5; cursor: default; }
+
+.status { margin-left: auto; opacity: .75; }
+.status.err { color: #e5484d; opacity: 1; }
+.status.ok { color: #30a46c; opacity: 1; }
+
+/* What the current form would do, and the one mistake worth shouting about. */
+.notice {
+  margin: 0 0 14px;
+  padding: 9px 12px;
+  border: 1px solid rgba(128, 128, 128, .32);
+  border-left: 3px solid rgba(128, 128, 128, .55);
+  border-radius: 6px;
+  background: rgba(128, 128, 128, .07);
+}
+
+.notice.warn { border-left-color: #f5a524; }
+.notice.bad { border-left-color: #e5484d; }
+
+.notice b { font-weight: 600; }

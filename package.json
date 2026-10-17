@@ -1,6 +1,6 @@
 {
   "name": "opencode-zen-free-resin",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "OpenCode Zen free models in magpie, with a self-hosted sing-box proxy pool that switches exit IP on rate limits and upstream errors",
   "type": "module",
   "main": "./index.mjs",
@@ -20,6 +20,10 @@
     "pool/fixtures/subscription.txt",
     "scripts/check-pool.mjs",
     "scripts/check-resin.mjs",
+    "page/index.html",
+    "page/app.js",
+    "page/style.css",
+    "page/icon.svg",
     "README.md",
     "LICENSE"
   ],
@@ -39,6 +43,11 @@
   },
   "magpie": {
     "icon": "https://opencode.ai/favicon-v3.ico",
-    "maxConcurrency": 2
+    "maxConcurrency": 2,
+    "page": {
+      "title": "代理池",
+      "file": "page/index.html",
+      "icon": "page/icon.svg"
+    }
   }
 }
