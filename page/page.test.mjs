@@ -56,12 +56,18 @@ test("the page's own test does not ship", () => {
 
 // ------------------------------------------------------------------ html shape
 
-test("index.html loads the bridge first and keeps scripts out of the markup", () => {
+test("index.html loads its scripts in the order they depend on", () => {
   const scripts = [...html.matchAll(/<script\b[^>]*\bsrc="([^"]+)"/g)].map((match) => match[1]);
-  const bridgeAt = scripts.findIndex((src) => src.includes("_magpie/bridge.js"));
-  const appAt = scripts.findIndex((src) => src.includes("app.js"));
+  const at = (needle) => scripts.findIndex((src) => src.includes(needle));
+  const guardAt = at("guard.js");
+  const bridgeAt = at("_magpie/bridge.js");
+  const appAt = at("app.js");
+  assert.ok(guardAt !== -1, "index.html does not load guard.js");
   assert.ok(bridgeAt !== -1, "index.html does not load the bridge");
   assert.ok(appAt !== -1, "index.html does not load app.js");
+  // The order is load-bearing: guard.js can only filter errors if it registers
+  // its listener before the bridge registers its own (both are on the window).
+  assert.ok(guardAt < bridgeAt, "guard.js must be loaded before the bridge");
   assert.ok(bridgeAt < appAt, "app.js is loaded before the bridge that installs `magpie`");
 
   // The page's policy allows its own files only: an inline script, or an
@@ -114,6 +120,78 @@ test("the page offers the options that decide which exit the traffic leaves from
   ]) {
     assert.match(pageSource, new RegExp(`key: "${key.replace(/\./g, "\\.")}"`), `the page has no field for ${key}`);
   }
+});
+
+// ------------------------------------------------- errors that are not ours
+
+// magpie's bridge forwards every error event in the frame to the window, which
+// then replaces the page with "this page stopped working". guard.js has to stop
+// that for errors that are not this page's without hiding this page's own. It is
+// run here the same way the browser runs it: as a classic script in the global
+// scope, against a stubbed window.
+const guardSource = fs.readFileSync(path.join(here, "guard.js"), "utf8");
+const PAGE = "https://magpie.test/_magpie/plugin/tok/index.html";
+const OWN_SCRIPTS = [
+  "https://magpie.test/_magpie/plugin/tok/guard.js",
+  "https://magpie.test/_magpie/plugin/tok/app.js",
+];
+
+// Returns a function that fires one error event and reports whether guard.js
+// stopped it from being forwarded.
+function installGuard(scripts = OWN_SCRIPTS, href = PAGE) {
+  const registered = [];
+  globalThis.location = { href };
+  globalThis.document = { scripts: scripts.map((src) => ({ src })) };
+  globalThis.addEventListener = (type, listener, capture) => registered.push({ type, listener, capture });
+  new Function(guardSource)();
+
+  const entry = registered.find((item) => item.type === "error");
+  assert.ok(entry, "guard.js registered no error listener");
+  assert.equal(entry.capture, true, "guard.js must listen in the capture phase to run before the bridge");
+
+  return (event) => {
+    let stopped = false;
+    entry.listener({
+      message: "",
+      filename: "",
+      error: undefined,
+      stopImmediatePropagation() {
+        stopped = true;
+      },
+      ...event,
+    });
+    return stopped;
+  };
+}
+
+test("an injected script's error is not passed off as this page's", () => {
+  const stop = installGuard();
+  // Injected code runs as the frame's own origin, so its message survives; a
+  // file magpie serves is cross-origin to that opaque origin and does not.
+  assert.equal(stop({ message: "Uncaught Error: Failed to connect to MetaMask" }), true);
+  assert.equal(stop({ message: "boom", filename: "chrome-extension://abcdef/inpage.js" }), true);
+});
+
+test("this page's own errors are still forwarded", () => {
+  const stop = installGuard();
+  assert.equal(stop({ message: "Script error." }), false, "a sanitized file error is this page's");
+  assert.equal(stop({ message: "" }), false, "an empty message is this page's");
+  assert.equal(
+    stop({ message: "boom", filename: "https://magpie.test/_magpie/plugin/tok/app.js" }),
+    false,
+    "an error naming a declared script is this page's",
+  );
+  assert.equal(
+    stop({ message: "boom", error: { fileName: "https://magpie.test/_magpie/plugin/tok/guard.js" } }),
+    false,
+    "the error object's fileName counts too",
+  );
+});
+
+test("an error that cannot name a declared script is not this page's", () => {
+  const stop = installGuard();
+  assert.equal(stop({ message: "boom", filename: "weird source" }), true);
+  assert.equal(stop({ message: "boom", filename: "https://elsewhere.test/x.js" }), true);
 });
 
 // ------------------------------------------------------- the save path, run

@@ -5,9 +5,12 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Proxy pool</title>
 <link rel="stylesheet" href="style.css">
-<!-- Served beside every page's own files; must come before app.js, which
-     only uses the `magpie` object it installs. Scripts have to be files:
-     the page's policy allows no inline script and no network. -->
+<!-- guard.js first, then the bridge, then app.js: each depends on the one
+     before it. guard.js must precede the bridge because it has to register
+     its error listener first to be able to filter them (see the file). Scripts
+     have to be files: the page's policy allows no inline script and no
+     network. -->
+<script src="guard.js"></script>
 <script src="_magpie/bridge.js"></script>
 <script src="app.js" defer></script>
 </head>
