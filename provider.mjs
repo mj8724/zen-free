@@ -8,14 +8,16 @@ import {
   configModels,
   parseProtocolDocs,
 } from "./models.mjs";
+import { rotate } from "./resin.mjs";
 import {
-  IPPool,
-  ResinAdmin,
-  accountNames,
-  parseResinURL,
-  requireForwardSupport,
-  rotate,
-} from "./resin.mjs";
+  DEFAULT_HEADER_TIMEOUT_MS,
+  forwardProxyURL,
+  attemptWithGate,
+  resolveExitSource,
+  withHeaderTimeout,
+  reverseProxyURL,
+} from "./pool/exits.mjs";
+import { zenProbeHeaders } from "./pool/probe.mjs";
 import { collapseResponse } from "./stream.mjs";
 import { guardToolResponse } from "./tool-response.mjs";
 
@@ -53,67 +55,27 @@ export function userAgent(protocol) {
 // asks Zen's list again: a model Zen made free since is served at once,
 // and a model typed in by hand doesn't ask the list on every request.
 const RELIST_AFTER = 60_000;
-const DEFAULT_ADDRESSES = 8;
-const DEFAULT_ATTEMPTS = 3;
 
-// Resin's forward proxy takes the identity as HTTP proxy credentials:
-// Platform.Account as the user and the proxy token as the password, which is
-// exactly what Resin's own docs ask a client to send.
-export function forwardProxyURL({ endpoint, token, platform }, account) {
-  const url = new URL(endpoint);
-  url.username = `${platform}.${account}`;
-  url.password = token;
-  return url.href;
-}
+// Resin's proxy URL builders now live with the exit sources; they are
+// re-exported here because scripts/check-resin.mjs imports them from the
+// plugin's own module.
+export { forwardProxyURL, reverseProxyURL };
 
-// Resin's reverse proxy takes the target in the path and the identity in a
-// header. It is offered for a runtime whose fetch has no proxy option, at the
-// cost of carrying the request to Resin in the clear.
-export function reverseProxyURL({ endpoint, token, platform }, baseURL, path) {
-  const target = new URL(`${baseURL}${path}`);
-  return `${endpoint}/${encodeURIComponent(token)}/${encodeURIComponent(platform)}/${target.protocol.replace(":", "")}/${target.host}${target.pathname}${target.search}`;
-}
-
-// Reads the Resin options once. A URL that was given but can't be used is
-// raised rather than ignored: falling back to a direct connection in silence
-// would leave a user believing their traffic moves between addresses.
-function exitAddresses(raw) {
-  if (!raw?.url) return undefined;
-  if (typeof raw.url !== "string") throw new Error("resin.url must be a string");
-  const { endpoint, token } = parseResinURL(raw.url);
-  const transport = raw.transport ?? "forward";
-  if (!["forward", "reverse"].includes(transport)) {
-    throw new Error(`resin.transport must be forward or reverse, got ${transport}`);
+// The pool and Resin are two sources of one thing: an address a request can
+// leave from. Which one is configured is decided once, at load.
+async function resolveExits(options, input) {
+  const headerTimeoutMs = options.headerTimeoutMs ?? DEFAULT_HEADER_TIMEOUT_MS;
+  if (!Number.isInteger(headerTimeoutMs) || headerTimeoutMs < 1) {
+    throw new Error(
+      `headerTimeoutMs must be a positive whole number of milliseconds, got ${JSON.stringify(options.headerTimeoutMs)}`,
+    );
   }
-  const addresses = raw.addresses ?? DEFAULT_ADDRESSES;
-  if (!Number.isInteger(addresses) || addresses < 1 || addresses > 1000) {
-    throw new Error(`resin.addresses must be a whole number from 1 to 1000, got ${raw.addresses}`);
-  }
-  const prefix = raw.account ?? "zen-free";
-  if (!/^[A-Za-z0-9_.-]+$/.test(prefix)) {
-    throw new Error("resin.account may only hold letters, digits, dot, dash and underscore");
-  }
-  const platform = raw.platform ?? "Default";
-  const attempts = raw.attempts ?? DEFAULT_ATTEMPTS;
-  if (!Number.isInteger(attempts) || attempts < 0 || attempts > 10) {
-    throw new Error(`resin.attempts must be a whole number from 0 to 10, got ${raw.attempts}`);
-  }
-  // Checked after the options themselves, so a bad option is reported as
-  // itself whatever the runtime is.
-  requireForwardSupport(transport);
-  return {
-    endpoint,
-    token,
-    platform,
-    transport,
-    attempts,
-    pool: new IPPool({ accounts: accountNames(prefix, addresses) }),
-    // Without the dashboard token a spent address keeps its lease, so reusing
-    // its Account yields the same refused address. Rotation itself still works.
-    admin: raw.adminToken
-      ? new ResinAdmin({ endpoint, token: raw.adminToken, platform })
-      : undefined,
-  };
+  const exits = await resolveExitSource(options, {
+    input,
+    log: (message) => console.log(`[zen-free-pool] ${message}`),
+    zenHeaders: zenProbeHeaders(userAgent("chat")),
+  });
+  return { exits, headerTimeoutMs };
 }
 
 function httpURL(value) {
@@ -256,7 +218,7 @@ async function server(_input, options = {}) {
   const baseURL = httpURL(options.baseURL ?? DEFAULT_BASE);
   const catalogURL = httpURL(options.catalogURL ?? CATALOG);
   const docsURL = httpURL(options.docsURL ?? DOCS);
-  const exits = exitAddresses(options.resin);
+  const { exits, headerTimeoutMs } = await resolveExits(options, _input);
   let known = buildModels(
     Object.keys(bootstrapProvider.models),
     bootstrapProvider,
@@ -271,7 +233,7 @@ async function server(_input, options = {}) {
   // One request, sent from one exit address. With Resin configured the
   // attempt carries that address's identity; without it this is the plain
   // fetch the plugin has always made.
-  function send(protocol, headers, body, request) {
+  async function send(protocol, headers, body, request) {
     const target = `${baseURL}${PATHS[protocol]}`;
     const init = {
       method: "POST",
@@ -281,28 +243,21 @@ async function server(_input, options = {}) {
       redirect: "error",
     };
     if (!exits) return fetch(target, init);
-    const attempt = (account) => {
-      if (exits.transport === "reverse") {
-        const identified = new Headers(headers);
-        identified.set("x-resin-account", account);
-        return fetch(reverseProxyURL(exits, baseURL, PATHS[protocol]), { ...init, headers: identified });
-      }
-      return fetch(target, { ...init, proxy: forwardProxyURL(exits, account) });
-    };
-    return rotate({
-      pool: exits.pool,
-      attempts: exits.attempts,
-      attempt,
-      signal: request.signal,
-      onMove: (move) => {
-        console.log(
-          `[zen-free-resin] ${move.from} -> ${move.to} after ${move.kind}${move.detail ? `: ${move.detail}` : ""}`,
-        );
-        // Dropping the lease is what makes a reused Account come back as a
-        // different address, so it is started here but never waited on.
-        if (exits.admin) void exits.admin.release(move.from);
-      },
-    });
+    const attemptFor = (source) => (id) =>
+      withHeaderTimeout((signal) => source.request(target, { ...init, signal }, id), {
+        callerSignal: request.signal,
+        headerTimeoutMs,
+      });
+    // The gate is applied OUTSIDE rotate(): see attemptWithGate.
+    return attemptWithGate(exits, (source) =>
+      rotate({
+        pool: source.pool,
+        attempts: source.attempts,
+        attempt: attemptFor(source),
+        signal: request.signal,
+        onMove: (move) => source.onMove(move),
+      }),
+    );
   }
 
   async function discover(signal) {
