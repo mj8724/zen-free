@@ -136,6 +136,35 @@ bunTest("exits: a pool with nothing to dial refuses to load instead of going dir
   );
 });
 
+// The automatic install is the documented default, and by construction it runs
+// only when nothing was configured and nothing is on PATH — which is the case
+// below. The provisioner here behaves like the real one: it refuses a `binary`
+// it was handed that is not a file, then downloads.
+//
+// This is the regression for a bug that made the install unreachable: the
+// caller passed the MANAGED path as `binary`, so the real provisionBinary read
+// it as an explicitly configured one, threw "... is not a file" at its first
+// branch, and never reached the managed copy or the download at all. Every
+// other pool test sets core.binary, and the stub accepted whatever it was
+// given, so nothing exercised the path the README promises.
+bunTest("exits: with no core.binary the pool asks the provisioner to install one", async () => {
+  const { deps } = poolDeps({ nodes: [node("a", 100, "1.1.1.1")] });
+  const asked = [];
+  deps.provisionBinary = async (options) => {
+    asked.push(options.binary);
+    if (options.binary !== undefined && options.binary !== "") {
+      throw new Error(`the configured sing-box binary ${options.binary} is not a file`);
+    }
+    assert.equal(options.download, true, "downloading stays allowed by default");
+    return { path: "downloaded-sing-box", source: "release", version: "1.14.3", stateDir: options.stateDir };
+  };
+
+  const source = await poolExitSource({ core: {}, probe: { timeoutMs: 50 }, attempts: 1 }, { deps });
+  assert.equal(source.kind, "pool");
+  assert.deepEqual(asked, [undefined], "a managed path must not be passed as if the user had configured it");
+  await source.stop();
+});
+
 bunTest("exits: a core that would not run is reported, not loaded anyway", async () => {
   const { deps } = poolDeps({ nodes: [node("a", 100)] });
   deps.startCore = async () => {

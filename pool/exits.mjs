@@ -15,8 +15,6 @@ import {
   DEFAULT_PORT_BASE,
   buildConfig,
   defaultStateDir,
-  findOnPath,
-  managedBinaryPath,
   provisionBinary,
   readCoreVersion,
   startCore,
@@ -223,10 +221,15 @@ export async function poolExitSource(raw, { input, log, env = process.env, fetch
 
   // 1. The core has to exist before anything can be measured or dialled, and
   //    that includes fetching it: the user asked for the install to be handled.
-  const configured = coreConfig.binary;
-  const onPath = typeof configured === "string" && configured !== "" ? configured : findOnPath("sing-box", { env });
+  //
+  //    provisionBinary owns the whole order — an explicit core.binary, then
+  //    whatever is on PATH, then the managed copy, and only then the network.
+  //    Handing it the managed path as `binary` made it read that path as an
+  //    explicitly configured one, so it threw "... is not a file" at the first
+  //    branch and the managed copy and the download were both unreachable: the
+  //    automatic install could never run. It gets only what the user set.
   const provisioned = await provision({
-    binary: onPath ?? managedBinaryPath(stateDir),
+    binary: coreConfig.binary,
     stateDir,
     download: coreConfig.download !== false,
     env,
