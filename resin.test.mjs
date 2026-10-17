@@ -110,6 +110,90 @@ test("pool: an empty pool is refused", () => {
   assert.throws(() => new IPPool({ accounts: [] }), /at least one account/);
 });
 
+// The pool is reordered on purpose: by measured latency, and to spread out the
+// addresses that share an exit IP. Every one of these tests fails on a pool
+// that keeps its per-address state against a position instead of an account.
+test("pool: cooling stays with its own address when the pool is reordered", () => {
+  const subject = pool(3);
+  assert.equal(subject.account(subject.failed(0, "status 429")), "zf-2", "zf-1 is given up on");
+  subject.setAccounts(["zf-2", "zf-1", "zf-3"]);
+  assert.equal(subject.slots[1].state, "cooling", "zf-1's cooling state travels with zf-1");
+  assert.equal(subject.slots[1].failures, 1);
+  assert.equal(subject.slots[0].state, "ready", "zf-2 is not made cooling by its neighbour's failure");
+  assert.equal(subject.slots[0].failures, 0);
+  assert.equal(subject.slots[2].state, "ready");
+});
+
+test("pool: slots[i] describes accounts[i] after a reorder", () => {
+  const subject = pool(3);
+  subject.succeeded(0, 100);
+  subject.succeeded(1, 500);
+  subject.failed(2, "status 429");
+  subject.setAccounts(["zf-3", "zf-2", "zf-1"]);
+  assert.deepEqual(subject.accounts, ["zf-3", "zf-2", "zf-1"]);
+  assert.equal(subject.slots.length, subject.accounts.length);
+  assert.equal(subject.slots[0].state, "cooling", "zf-3 is at index 0 and it is the cooling one");
+  assert.equal(subject.slots[0].failures, 1);
+  assert.equal(subject.slots[1].ttfbMs, 500, "zf-2 is at index 1 and it is the measured 500ms one");
+  assert.equal(subject.slots[2].ttfbMs, 100, "zf-1 is at index 2 and it is the measured 100ms one");
+});
+
+test("pool: an address new to the pool starts fresh", () => {
+  const subject = pool(2);
+  subject.succeeded(0, 90);
+  subject.setAccounts(["zf-1", "zf-2", "zf-3"]);
+  assert.equal(subject.slots.length, 3);
+  assert.equal(subject.slots[0].samples, 1, "the addresses that stayed keep what was measured about them");
+  assert.equal(subject.slots[0].ttfbMs, 90);
+  assert.equal(subject.slots[2].samples, 0, "zf-3 has never been used");
+  assert.equal(subject.slots[2].state, "ready");
+  assert.equal(subject.slots[2].ttfbMs, undefined);
+  assert.equal(subject.slots[2].failures, 0);
+});
+
+test("pool: an address taken out drops its state and disturbs no other", () => {
+  const subject = pool(3);
+  subject.succeeded(0, 100);
+  subject.failed(1, "status 429");
+  subject.setAccounts(["zf-1", "zf-3"]);
+  assert.deepEqual(subject.accounts, ["zf-1", "zf-3"]);
+  assert.equal(subject.slots.length, 2);
+  assert.equal(subject.slots[0].ttfbMs, 100, "zf-1 is untouched by zf-2 leaving");
+  assert.equal(subject.slots[0].samples, 1);
+  assert.equal(subject.slots[1].state, "ready", "zf-3 does not inherit the state zf-2 left behind");
+  assert.equal(subject.slots[1].failures, 0);
+  subject.setAccounts(["zf-1", "zf-3", "zf-2"]);
+  assert.equal(subject.slots[2].samples, 0, "a returning address comes back fresh, not with stale state");
+  assert.equal(subject.slots[2].state, "ready");
+  assert.equal(subject.slots[2].failures, 0);
+});
+
+test("pool: the address in use follows its id through a reorder, not its index", () => {
+  const subject = pool(3);
+  assert.equal(subject.account(subject.failed(0, "status 429")), "zf-2");
+  assert.equal(subject.active, 1);
+  subject.setAccounts(["zf-2", "zf-3", "zf-1"]);
+  assert.equal(subject.account(), "zf-2", "the next request still leaves from the address in use");
+  assert.equal(subject.active, 0, "the index moved with the address");
+  subject.succeeded(subject.active, 250);
+  assert.equal(subject.slots[0].ttfbMs, 250, "the measurement lands on the address that was used");
+  assert.equal(subject.slots[2].ttfbMs, undefined, "and not on whatever now sits where it sat");
+});
+
+test("pool: the pool moves to a ready address when the one in use is taken out", () => {
+  const subject = pool(3);
+  assert.equal(subject.account(subject.failed(0, "status 429")), "zf-2");
+  subject.setAccounts(["zf-1", "zf-3"]);
+  assert.equal(subject.account(), "zf-3", "a used address is taken before the cooling one");
+  assert.equal(subject.account(subject.pick()), "zf-3");
+});
+
+test("pool: a reorder that would leave nothing to use is refused", () => {
+  const subject = pool(2);
+  assert.throws(() => subject.setAccounts([]), /at least one account/);
+  assert.deepEqual(subject.accounts, ["zf-1", "zf-2"], "a refused reorder changes nothing");
+});
+
 test("classify: a streamed answer is never read and never moves traffic", async () => {
   const stream = reply(200, 'data: {"error":"upstream error"}\n\n', "text/event-stream");
   const verdict = await classifyResponse(stream);

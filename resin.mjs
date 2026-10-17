@@ -180,44 +180,88 @@ export function transportFailure(error, signal) {
   return { kind: name === "TimeoutError" ? "timeout" : "transport", detail: error?.message ?? String(error) };
 }
 
+function freshSlot() {
+  return {
+    state: "ready",
+    ttfbMs: undefined,
+    samples: 0,
+    failures: 0,
+    lastKind: undefined,
+    givenUpAt: 0,
+  };
+}
+
 // Holds one exit address in use at a time and the ones it may move to.
 // Moving is the caller's decision (see rotate); this remembers what happened,
 // so that a move lands on a fresh address before it reuses a measured one,
 // and on the fastest address once every address has been measured.
 //
+// What happened is held against the account id, never against a position: the
+// pool is meant to be reordered (by measured latency, or to spread out the
+// addresses that share an exit IP), and a reordering that moved cooling
+// state, ttfbMs or the active address to a neighbour would silently stop
+// rotation instead of failing. The index-keyed faces of the pool are derived
+// from the id-keyed state, so they cannot drift apart.
+//
 // A given up address is never used again while any other is available, so
 // resting is an ordering rather than a timer: a request always has to be
 // served, and the only question is which address serves it.
 export class IPPool {
+  #states = new Map();
+  #activeId;
+
   constructor({ accounts, now = Date.now }) {
     if (!accounts?.length) throw new Error("The exit address pool needs at least one account");
     this.accounts = accounts;
     this.now = now;
-    this.active = 0;
-    this.slots = accounts.map(() => ({
-      state: "ready",
-      ttfbMs: undefined,
-      samples: 0,
-      failures: 0,
-      lastKind: undefined,
-      givenUpAt: 0,
-    }));
+    this.#activeId = accounts[0];
+    for (const id of accounts) this.#stateFor(id);
+  }
+
+  // The slot state of every address, index-aligned with accounts: slots[i]
+  // describes accounts[i], and follows it when the pool is reordered.
+  get slots() {
+    return this.accounts.map((id) => this.#stateFor(id));
+  }
+
+  // The position of the address in use, derived from its id rather than kept
+  // beside it: reordering the accounts moves this index, never the address.
+  get active() {
+    return this.accounts.indexOf(this.#activeId);
   }
 
   account(index = this.active) {
     return this.accounts[index];
   }
 
+  // Reorder the pool, add addresses to it and take addresses out of it. Slot
+  // state travels with the account id: an address that stays keeps what was
+  // measured and given up on about it wherever it lands, an id the pool has
+  // not seen starts fresh, and an id that is gone drops its state. The
+  // address in use is found again by id, so a reordering does not move traffic
+  // to another address; if the address in use has been taken out, the pool
+  // moves on to a ready one, exactly as it would after a failure.
+  setAccounts(orderedIds) {
+    if (!orderedIds?.length) throw new Error("The exit address pool needs at least one account");
+    const kept = new Set(orderedIds);
+    for (const id of [...this.#states.keys()]) {
+      if (!kept.has(id)) this.#states.delete(id);
+    }
+    this.accounts = orderedIds;
+    for (const id of orderedIds) this.#stateFor(id);
+    if (!kept.has(this.#activeId)) this.#moveFrom(this.#activeId);
+  }
+
   // The address to use now. It stays put while it is usable.
   pick() {
-    if (this.slots[this.active].state === "ready") return this.active;
-    return this.#moveFrom(this.active);
+    if (this.#stateFor(this.#activeId).state === "ready") return this.active;
+    return this.#moveFrom(this.#activeId);
   }
 
   // Time to the response headers, which is the part of a request the exit
   // address itself decides.
   succeeded(index, ttfbMs) {
-    const slot = this.slots[index];
+    const slot = this.#stateFor(this.accounts[index]);
     slot.state = "ready";
     slot.samples += 1;
     slot.lastKind = undefined;
@@ -228,48 +272,62 @@ export class IPPool {
   // the failure but never moves twice, so concurrent requests that fail
   // together rotate the pool once between them.
   failed(index, kind) {
-    const slot = this.slots[index];
+    const id = this.accounts[index];
+    const slot = this.#stateFor(id);
     slot.failures += 1;
     slot.lastKind = kind;
     slot.state = "cooling";
     slot.givenUpAt = this.now();
-    if (this.active === index) this.active = this.#moveFrom(index);
+    if (this.#activeId === id) this.#moveFrom(id);
     return this.active;
+  }
+
+  // One address's state, created on first sight so that a slot always exists
+  // for an account, whatever order the two were brought together in.
+  #stateFor(id) {
+    let slot = this.#states.get(id);
+    if (!slot) {
+      slot = freshSlot();
+      this.#states.set(id, slot);
+    }
+    return slot;
   }
 
   // An address that has never been used is taken before a measured one, so
   // each move spends a fresh address; once all are measured, the quickest one
   // is taken. When every address has been given up on, the pool takes the one
   // it gave up on longest ago, whose lease the caller drops so that reusing
-  // its Account yields a different address.
+  // its Account yields a different address. The address in use is set here,
+  // by id, and its index is read back from the pool.
   #moveFrom(exclude) {
-    const candidates = [];
-    for (let index = 0; index < this.slots.length; index += 1) {
-      if (index === exclude) continue;
-      if (this.slots[index].state === "ready") candidates.push(index);
-    }
+    const candidates = this.accounts.filter(
+      (id) => id !== exclude && this.#stateFor(id).state === "ready",
+    );
     if (candidates.length) {
-      const fresh = candidates.filter((index) => this.slots[index].samples === 0);
+      const fresh = candidates.filter((id) => this.#stateFor(id).samples === 0);
       const chosen = fresh.length
         ? fresh[0]
-        : candidates.reduce((best, index) =>
-            this.slots[index].ttfbMs < this.slots[best].ttfbMs ? index : best,
+        : candidates.reduce((best, id) =>
+            this.#stateFor(id).ttfbMs < this.#stateFor(best).ttfbMs ? id : best,
           );
-      return (this.active = chosen);
+      return this.#activate(chosen);
     }
     const resting =
-      this.slots.length > 1
-        ? this.slots.map((_, index) => index).filter((index) => index !== exclude)
-        : [exclude];
-    const chosen = resting.reduce((best, index) =>
-      this.slots[index].givenUpAt < this.slots[best].givenUpAt ? index : best,
+      this.accounts.length > 1 ? this.accounts.filter((id) => id !== exclude) : [exclude];
+    const chosen = resting.reduce((best, id) =>
+      this.#stateFor(id).givenUpAt < this.#stateFor(best).givenUpAt ? id : best,
     );
-    const slot = this.slots[chosen];
+    const slot = this.#stateFor(chosen);
     slot.state = "ready";
     slot.ttfbMs = undefined;
     slot.samples = 0;
     slot.lastKind = undefined;
-    return (this.active = chosen);
+    return this.#activate(chosen);
+  }
+
+  #activate(id) {
+    this.#activeId = id;
+    return this.accounts.indexOf(id);
   }
 }
 
