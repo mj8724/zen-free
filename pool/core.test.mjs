@@ -16,9 +16,12 @@ import {
   buildConfig,
   checkConfig,
   compareVersions,
+  coreCount,
   downloadAsset,
   extractArchiveEntry,
   findOnPath,
+  healthy,
+  lastError,
   managedBinaryPath,
   normalizeVersion,
   parseVersionOutput,
@@ -27,12 +30,14 @@ import {
   provisionBinary,
   readCoreVersion,
   startCore,
+  stopAll,
 } from "./core.mjs";
 import { parseSubscription } from "./protocols.mjs";
 
-// The real core this pool is built for. It is not vendored: the integration
-// tests skip cleanly when it is not on this machine, and everything that does
-// not need a process runs either way.
+// The real core this pool is built for, at the path it was handed for this task
+// or wherever ZEN_FREE_SING_BOX points. It is not vendored: the tests that need
+// a process skip cleanly when it is not on this machine, and everything that
+// does not need one runs either way.
 const REAL_BINARY = process.env.ZEN_FREE_SING_BOX ?? "G:/tmp/sing-box.exe";
 const hasRealBinary = fs.existsSync(REAL_BINARY);
 const realTest = hasRealBinary ? test : test.skip;
@@ -806,13 +811,31 @@ realTest("the generated config runs, and each inbound proxies through its own ou
   assert.match(handle.stderr, /inbound\/http\[in-0\]/, "the core's own log must name the inbound");
   assert.match(handle.stderr, /outbound\/http\[out-1\]/, "the core's own log must name the outbound it used");
   assert.ok(lines.some((line) => line.includes("sing-box is up")), "the caller is told when the core is up");
+  // The whole-process gates agree with this handle while it is the only core.
+  assert.equal(coreCount(), 1);
+  assert.equal(healthy(), true);
+  assert.equal(lastError(), null);
 
   await handle.stop();
   assert.equal(handle.phase, "stopped");
   assert.equal(handle.healthy(), false);
+  assert.equal(healthy(), false, "no core is supervised after the last stop");
+  assert.equal(coreCount(), 0);
   assert.deepEqual(await portStates([base, base + 1]), ["free", "free"], "stop must give the ports back");
   assert.equal(fs.existsSync(handle.configPath), false, "the temp config is removed on stop");
   await assert.rejects(() => proxyGet(handle.ports[0], "http://example.invalid/x", 2_000), "nothing may listen after stop");
+
+  // The same ports come back, and stopAll() tears a core down without a handle.
+  const restarted = await startCore({
+    nodes: parsed,
+    core: { binary: REAL_BINARY, portBase: base, stateDir: box.path("state") },
+    startTimeoutMs: 15_000,
+  });
+  assert.equal(restarted.healthy(), true, JSON.stringify(restarted.lastError));
+  assert.equal(coreCount(), 1);
+  assert.equal(await stopAll(), 1);
+  assert.equal(coreCount(), 0);
+  assert.deepEqual(await portStates([base, base + 1]), ["free", "free"]);
 });
 
 realTest("a config sing-box refuses is never started, and its stderr is what the caller sees", { timeout: 60_000 }, async (t) => {
@@ -862,12 +885,17 @@ realTest("after five consecutive failures it stops restarting and only reports",
   t.after(() => box.cleanup());
   const base = await freeBase(1);
   const lines = [];
-  // `sing-box version` exits at once, so no port is ever bound: the supervisor
-  // sees a core that is up for a moment and gone again, three times.
+  // The config is built and checked by the real core, and a process that dies at
+  // once is run in its place: the readiness window has to be shorter than the
+  // process's own start-up, and a cold start of the 82 MB binary (or of the
+  // test runtime itself) on this machine can take longer than that, which made
+  // this test race the runtime instead of the policy it is about. A shell that
+  // exits with a code is as instant as a process gets on either platform.
+  const dying = process.platform === "win32" ? ["cmd.exe", "/c", "exit", "7"] : ["/bin/sh", "-c", "exit 7"];
   const handle = await startCore({
     nodes: nodes(1),
     core: { binary: REAL_BINARY, portBase: base, stateDir: box.path("state"), maxRestarts: 2 },
-    command: [REAL_BINARY, "version"],
+    command: dying,
     log: (line) => lines.push(line),
     restartDelays: [20, 20],
     startTimeoutMs: 1_500,
@@ -881,10 +909,12 @@ realTest("after five consecutive failures it stops restarting and only reports",
   assert.equal(handle.phase, "failed");
   assert.equal(handle.healthy(), false);
   assert.equal(handle.lastError.code, "CORE_EXITED");
+  assert.match(handle.lastError.message, /code 7/, "the exit code must reach the caller");
   assert.equal(handle.stats().starts, 3, "one start and two restarts");
   assert.equal(handle.stats().restarts, 2);
   assert.equal(handle.stats().failures, 3);
   assert.ok(lines.some((line) => /not restarting again/.test(line)), "giving up is reported, not silent");
+  assert.equal(lastError()?.code, "CORE_EXITED", "the whole-process gate sees the same failure");
 
   // Nothing is restarted after giving up.
   await new Promise((resolve) => setTimeout(resolve, 300));
@@ -907,6 +937,7 @@ realTest("a core is reclaimed when the process that started it exits, without st
       "});",
       'if (!handle.healthy()) { console.error(`not healthy: ${JSON.stringify(handle.lastError)}`); process.exit(1); }',
       'console.log("READY");',
+      'console.log(`CONFIG ${handle.configPath}`);',
       "process.exit(0);",
       "",
     ].join("\n"),
@@ -925,7 +956,47 @@ realTest("a core is reclaimed when the process that started it exits, without st
   assert.match(output, /READY/);
 
   // process.exit() cannot await anything, so this only holds if the 'exit'
-  // handler killed the child synchronously.
+  // handler killed the child and removed its config synchronously.
   const released = await eventually(async () => (await portStates([base]))[0] === "free", 5_000);
   assert.equal(released, true, "sing-box outlived the process that started it: an orphan");
+  const configPath = /CONFIG (.+)/.exec(output)?.[1]?.trim();
+  assert.ok(configPath, "the child must report the config it wrote");
+  assert.equal(await eventually(() => !fs.existsSync(configPath), 5_000), true, "the temp config outlived its process");
+});
+
+test("a body with no length is accepted once it ends, and one with a length must match it", async (t) => {
+  const box = sandbox("nolength");
+  t.after(() => box.cleanup());
+  const dest = box.path("sing-box.zip");
+  // Node's http server chunks a response that sets no content-length, so this
+  // is the case where the only thing that says "finished" is the end of body.
+  const server = http.createServer((req, res) => {
+    res.writeHead(200, { "content-type": "application/octet-stream" });
+    res.end(ARCHIVE);
+  });
+  const port = await listen(server);
+  t.after(() => close(server));
+  const result = await downloadAsset({ url: `http://127.0.0.1:${port}/asset`, dest, size: null, stallMs: 5_000 });
+  assert.equal(result.bytes, ARCHIVE.length);
+  assert.equal(fs.readFileSync(dest).equals(ARCHIVE), true);
+});
+
+realTest("a pool with no nodes still runs, because there is nothing to bind", { timeout: 60_000 }, async (t) => {
+  const box = sandbox("empty");
+  t.after(() => box.cleanup());
+  const handle = await startCore({
+    nodes: [],
+    core: { binary: REAL_BINARY, stateDir: box.path("state") },
+    startTimeoutMs: 10_000,
+  });
+  t.after(async () => {
+    await handle.stop();
+  });
+  assert.equal(handle.healthy(), true, JSON.stringify(handle.lastError));
+  assert.deepEqual(handle.ports, []);
+  assert.equal(handle.config.inbounds.length, 0);
+  assert.equal(handle.config.route.final, "direct");
+  await handle.stop();
+  assert.equal(handle.healthy(), false);
+  assert.equal(coreCount(), 0);
 });

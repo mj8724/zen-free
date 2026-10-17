@@ -9,9 +9,12 @@
 // Every field choice below was checked against a real sing-box 1.14.3 core --
 // `sing-box check` plus a live run and a proxied request, not the docs alone:
 //
-//   * `listen` is written explicitly as 127.0.0.1 on every inbound. An HTTP
-//     inbound takes no credentials, so a wildcard listen publishes N open
-//     proxies to the LAN; the tests assert no inbound leaves loopback.
+//   * `listen` is written explicitly as 127.0.0.1 on every inbound, and a test
+//     asserts that nothing but loopback is ever bound. An HTTP inbound takes no
+//     credentials, so a wildcard listen publishes N open proxies to the LAN.
+//     1.14.3's http inbound happens to default to 127.0.0.1 when the field is
+//     left out (measured), which is exactly why the field is written out: the
+//     safety of an unauthenticated proxy should not rest on a default.
 //   * `connect_timeout` is set on every outbound (and on `direct`). On this
 //     deployment a real node host takes 3s+ just to finish a TCP connect, and
 //     sing-box's 5s default dial timeout made reachable nodes fail with
@@ -681,12 +684,14 @@ async function writeChunks({ response, dest, have, expected, stallMs, progressBy
   return { have, complete: expected === null ? ended : have >= expected };
 }
 
-// The measured reality of this environment: the asset endpoint answers, but at
-// roughly 34 KB/s for a 32 MB release, and the connection is dropped long
-// before the end. So the bytes on disk are the state: every round asks for
-// `Range: bytes=<have>-` and appends, a stalled socket costs one round, and the
-// file is only accepted once its size -- and its digest, when GitHub reports
-// one -- matches the release.
+// Why this is not one plain fetch: on this network the asset endpoint was
+// measured at ~34 KB/s for this 31.3 MiB release, with the connection dropped
+// before the end, and a later run took the same asset at a steady ~200 KB/s in
+// a single round. Both are handled the same way: the file on disk is the state
+// (every round asks for `Range: bytes=<have>-` and appends), a stalled socket
+// costs one round, and nothing is accepted until the size -- and the sha256,
+// which GitHub reports for the asset -- matches the release. A run that exhausts
+// its attempts leaves the partial file behind, so the next one continues it.
 export async function downloadAsset({
   url,
   dest,
@@ -885,10 +890,10 @@ export async function provisionBinary(options = {}) {
 // ------------------------------------------------------------- the process
 
 // `process.on("exit")` runs after the event loop has stopped, so only
-// synchronous work is possible there -- and on Windows killing a child is
-// exactly synchronous (SIGKILL is TerminateProcess). One shared handler
+// synchronous work is possible there -- and killing a child (TerminateProcess on
+// Windows) and removing a directory are both synchronous. One shared handler
 // services every live core, so a second core does not stack listeners.
-const liveChildren = new Set();
+const live = new Set();
 let exitHandlerInstalled = false;
 let signalHandlersInstalled = false;
 
@@ -902,18 +907,30 @@ function killSync(child) {
   }
 }
 
+// What the process has to give back when it leaves: the child, and the temp
+// config it was started with. Nothing here may await anything.
+function reclaimAll() {
+  for (const entry of live) {
+    killSync(entry.child);
+    try {
+      fs.rmSync(entry.tempDir, { recursive: true, force: true });
+    } catch {
+      // A temp dir that is already gone, or that something else holds, is not
+      // worth failing an exit over.
+    }
+  }
+}
+
 function installProcessHandlers(signals) {
   if (!exitHandlerInstalled) {
     exitHandlerInstalled = true;
-    process.on("exit", () => {
-      for (const child of liveChildren) killSync(child);
-    });
+    process.on("exit", reclaimAll);
   }
   if (signals && !signalHandlersInstalled) {
     signalHandlersInstalled = true;
     for (const [signal, code] of [["SIGINT", 130], ["SIGTERM", 143]]) {
       process.on(signal, () => {
-        for (const child of liveChildren) killSync(child);
+        reclaimAll();
         process.exit(code);
       });
     }
@@ -928,6 +945,9 @@ function installProcessHandlers(signals) {
  * options.nodes  the outbounds to route through (parseSubscription(...) works)
  * options.core   the plugin's own options: binary, stateDir, portBase,
  *                connectTimeout, logLevel, maxRestarts, download, handleSignals
+ *
+ * The handle is the gate for this core; the module-level healthy()/lastError()
+ * are the same gate across every core this process supervises.
  */
 export async function startCore(options = {}) {
   const core = isPlainObject(options.core) ? options.core : {};
@@ -970,7 +990,7 @@ export async function startCore(options = {}) {
     throw new CoreError(
       "CORE_CHECK_FAILED",
       `sing-box ${coreVersion} refused the generated config, so it was not started: ${check.detail}`,
-      { command: check.command, stderr: check.stderr, stdout: check.stdout, config: built.config, configPath },
+      { command: check.command, stderr: check.stderr, stdout: check.stdout, config: built.config },
     );
   }
   log(`sing-box ${coreVersion} accepted the config: ${built.counts.inbound} inbound, ${built.counts.outbound} outbound, ports ${built.ports[0] ?? "-"}..${built.ports.at(-1) ?? "-"}`);
@@ -1051,12 +1071,14 @@ export async function startCore(options = {}) {
     }
     attempt.child = child;
     state.child = child;
-    liveChildren.add(child);
+    live.add({ child, tempDir });
     child.stdout?.on("data", (chunk) => record(chunk, "out"));
     child.stderr?.on("data", (chunk) => record(chunk, "err"));
     child.on("error", (error) => settle(attempt, failure("CORE_SPAWN_FAILED", `sing-box could not be started: ${error.message}`)));
     child.on("exit", (code, signal) => {
-      liveChildren.delete(child);
+      for (const entry of live) {
+        if (entry.child === child) live.delete(entry);
+      }
       state.lastExit = { code, signal, at: Date.now() };
       const tail = lastLines(state.lines.slice(-6).join("\n"), 2);
       settle(
@@ -1172,7 +1194,9 @@ export async function startCore(options = {}) {
       state.watcher = null;
     }
     const child = state.child;
-    liveChildren.delete(child);
+    for (const entry of live) {
+      if (entry.child === child) live.delete(entry);
+    }
     killSync(child);
     if (child !== null) {
       const deadline = Date.now() + timeoutMs;
@@ -1188,6 +1212,7 @@ export async function startCore(options = {}) {
       await sleep(50);
     }
     state.phase = "stopped";
+    owned.delete(handle);
     fs.rmSync(tempDir, { recursive: true, force: true });
     log(`sing-box stopped; ${state.ports.join(", ") || "no ports"} released and the temp config removed`);
   }
@@ -1242,7 +1267,39 @@ export async function startCore(options = {}) {
     void healthCheck();
   }, healthIntervalMs);
   state.watcher.unref?.();
+  owned.add(handle);
   beginAttempt();
   await handle.waitForReady({ timeoutMs: startTimeoutMs + 1_000 });
   return handle;
+}
+
+// -------------------------------------------------------------------- the set
+// A handle is what a caller who started one core needs. These are for a caller
+// that wants a single gate over everything this process runs, and for tearing
+// the pool down when a handle has been lost.
+
+const owned = new Set();
+
+/** True when every core this process supervises is up. False when there is none. */
+export function healthy() {
+  return owned.size > 0 && [...owned].every((core) => core.healthy());
+}
+
+/** The most recent failure any supervised core reported, or null. */
+export function lastError() {
+  const failures = [...owned].map((core) => core.lastError).filter(Boolean);
+  if (failures.length === 0) return null;
+  return failures.reduce((newest, failure) => (failure.at > newest.at ? failure : newest));
+}
+
+/** How many cores this process is supervising. */
+export function coreCount() {
+  return owned.size;
+}
+
+/** Stop every supervised core, and answer how many were stopped. */
+export async function stopAll(options) {
+  const cores = [...owned];
+  await Promise.all(cores.map((core) => core.stop(options)));
+  return cores.length;
 }

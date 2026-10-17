@@ -1,7 +1,7 @@
 {
   "name": "opencode-zen-free-resin",
-  "version": "0.2.0",
-  "description": "OpenCode Zen free models through magpie, backed by a Resin proxy pool that switches exit IP on rate limits and upstream errors",
+  "version": "0.3.0",
+  "description": "OpenCode Zen free models in magpie, with a self-hosted sing-box proxy pool that switches exit IP on rate limits and upstream errors",
   "type": "module",
   "main": "./index.mjs",
   "files": [
@@ -11,10 +11,28 @@
     "resin.mjs",
     "stream.mjs",
     "tool-response.mjs",
+    "pool/core.mjs",
+    "pool/exits.mjs",
+    "pool/probe.mjs",
+    "pool/protocols.mjs",
+    "pool/sources.mjs",
+    "pool/state.mjs",
+    "pool/fixtures/subscription.txt",
+    "scripts/check-pool.mjs",
+    "scripts/check-resin.mjs",
     "README.md",
     "LICENSE"
   ],
-  "keywords": ["opencode", "opencode-plugin", "zen", "free", "magpie", "resin", "proxy"],
+  "keywords": [
+    "opencode",
+    "opencode-plugin",
+    "zen",
+    "free",
+    "magpie",
+    "resin",
+    "proxy",
+    "sing-box"
+  ],
   "license": "MIT",
   "scripts": {
     "test": "node --test"

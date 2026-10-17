@@ -1,5 +1,12 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+
+// The pool dials its nodes through a local HTTP proxy, and requireForwardSupport
+// refuses that on a runtime whose fetch accepts a proxy option and ignores it.
+// That refusal is the point; it just means these particular cases are Bun-only,
+// so they are skipped elsewhere rather than having the guard weakened for them.
+const underBun = typeof globalThis.Bun !== "undefined";
+const bunTest = underBun ? test : test.skip;
 import {
   forwardProxyURL,
   poolExitSource,
@@ -57,7 +64,7 @@ test("exits: a neutral-only measurement still ranks ahead of an unmeasured addre
 // ---------------------------------------------------------------- resin
 
 test("exits: the resin source keeps the identity Resin asks for", () => {
-  const source = resinExitSource({ url: "http://resin.example:2260/token-abc", platform: "Default", account: "zf", addresses: 3 });
+  const source = resinExitSource({ url: "http://resin.example:2260/token-abc", platform: "Default", account: "zf", addresses: 3, transport: underBun ? "forward" : "reverse" });
   assert.equal(source.kind, "resin");
   assert.equal(source.ready(), true, "resin has no local core to be unhealthy");
   assert.equal(forwardProxyURL({ endpoint: "http://resin.example:2260", token: "tok", platform: "Default" }, "zf-1"), "http://Default.zf-1:tok@resin.example:2260/");
@@ -117,7 +124,7 @@ function poolDeps({ nodes, healthy = () => true, built, coreLog } = {}) {
 
 const basePool = { core: { binary: "fake-sing-box" }, probe: { timeoutMs: 50 }, attempts: 1 };
 
-test("exits: a pool with nothing to dial refuses to load instead of going direct", async () => {
+bunTest("exits: a pool with nothing to dial refuses to load instead of going direct", async () => {
   const { deps } = poolDeps({ nodes: [] });
   await assert.rejects(
     () => poolExitSource({ ...basePool }, { deps }),
@@ -129,7 +136,7 @@ test("exits: a pool with nothing to dial refuses to load instead of going direct
   );
 });
 
-test("exits: a core that would not run is reported, not loaded anyway", async () => {
+bunTest("exits: a core that would not run is reported, not loaded anyway", async () => {
   const { deps } = poolDeps({ nodes: [node("a", 100)] });
   deps.startCore = async () => {
     throw new Error("sing-box check exited 1: bad outbound");
@@ -137,7 +144,7 @@ test("exits: a core that would not run is reported, not loaded anyway", async ()
   await assert.rejects(() => poolExitSource({ ...basePool }, { deps }), /sing-box check exited 1/);
 });
 
-test("exits: a pool whose core dies reports itself unhealthy, so no address is spent", async () => {
+bunTest("exits: a pool whose core dies reports itself unhealthy, so no address is spent", async () => {
   const { deps } = poolDeps({ nodes: [node("a", 100), node("b", 200)], healthy: () => false });
   const source = await poolExitSource({ ...basePool }, { deps });
   await source.stop();
@@ -147,7 +154,7 @@ test("exits: a pool whose core dies reports itself unhealthy, so no address is s
   assert.equal(source.kind, "pool");
 });
 
-test("exits: each node keeps the port the core wrote for it", async () => {
+bunTest("exits: each node keeps the port the core wrote for it", async () => {
   const nodes = [node("a", 100), node("b", 200)];
   const { deps } = poolDeps({ nodes });
   const source = await poolExitSource({ ...basePool }, { deps });
@@ -157,7 +164,7 @@ test("exits: each node keeps the port the core wrote for it", async () => {
   await assert.rejects(() => source.request("https://example.invalid/", {}, "no-such-node"), /no node with id/);
 });
 
-test("exits: a core that accepted fewer nodes than were offered is a hard error", async () => {
+bunTest("exits: a core that accepted fewer nodes than were offered is a hard error", async () => {
   const nodes = [node("a", 100), node("b", 200)];
   const { deps } = poolDeps({ nodes, built: { config: {}, ports: [28100], counts: { inbound: 1 } } });
   await assert.rejects(
@@ -166,7 +173,7 @@ test("exits: a core that accepted fewer nodes than were offered is a hard error"
   );
 });
 
-test("exits: giving up on a node takes it out of the running without touching its port", async () => {
+bunTest("exits: giving up on a node takes it out of the running without touching its port", async () => {
   const nodes = [node("a", 100), node("b", 200)];
   const { deps } = poolDeps({ nodes });
   const source = await poolExitSource({ ...basePool }, { deps });
@@ -177,7 +184,7 @@ test("exits: giving up on a node takes it out of the running without touching it
   assert.equal(source.pool.accounts.length, 2);
 });
 
-test("exits: the certificate-pin warning is raised at load, not left implicit", async () => {
+bunTest("exits: the certificate-pin warning is raised at load, not left implicit", async () => {
   const said = [];
   const nodes = [node("a", 100)];
   const { deps } = poolDeps({ nodes });
@@ -194,7 +201,7 @@ test("exits: the certificate-pin warning is raised at load, not left implicit", 
   assert.match(said.join("\n"), /ignored 2 "quicSecurity"/);
 });
 
-test("exits: the pool takes precedence over resin when both are configured", async () => {
+bunTest("exits: the pool takes precedence over resin when both are configured", async () => {
   const { deps } = poolDeps({ nodes: [node("a", 100)] });
   const pool = await poolExitSource({ ...basePool }, { deps });
   const chosen = await resolveExitSource(
