@@ -108,6 +108,12 @@ function listen(server) {
 }
 
 function close(server) {
+  // server.close() only completes once every connection has ended, and a
+  // keep-alive socket left behind by a proxied request or by the core itself
+  // never ends on its own. Without this the teardown waits forever: the test's
+  // assertions all pass and the file still never exits, which is why this only
+  // ever showed up as a hang on the Node baseline.
+  server.closeAllConnections?.();
   return new Promise((resolve) => server.close(() => resolve()));
 }
 
@@ -836,6 +842,13 @@ realTest("the generated config runs, and each inbound proxies through its own ou
   assert.equal(await stopAll(), 1);
   assert.equal(coreCount(), 0);
   assert.deepEqual(await portStates([base, base + 1]), ["free", "free"]);
+  // stopAll() killed the process from the outside. Under Node a ChildProcess
+  // whose stdio was piped keeps the event loop alive until those streams are
+  // closed, so the handle is released here too. Without this the file passes
+  // its assertions and then never exits, which reads as a hang rather than as
+  // the harness bug it is. Bun happens to exit regardless, which is exactly why
+  // this only ever showed up on the Node baseline.
+  await restarted.stop();
 });
 
 realTest("a config sing-box refuses is never started, and its stderr is what the caller sees", { timeout: 60_000 }, async (t) => {
