@@ -386,6 +386,31 @@ export async function poolExitSource(raw, { input, log, env = process.env, fetch
     attempts,
     warnings,
     ready: () => core.healthy(),
+    // What the pool holds right now, for anything that reports on it: the
+    // account's usage row is the one place magpie shows a plugin's own status.
+    // A read of what is already in memory — it measures nothing, persists
+    // nothing, and changes nothing.
+    //
+    // "alive" means an address the pool can actually leave from, by the same
+    // rule the rest of the pool already uses (distinctIpWarnings): a retired
+    // node is out for good, and a node with no measured address never answered.
+    // Counting either would report IPs the pool does not have, which is the
+    // number this exists to report.
+    status() {
+      const total = nodes.length;
+      const alive = nodes.filter((node) => node.status !== "retired" && node.lastExitIp).length;
+      return {
+        total,
+        alive,
+        dead: total - alive,
+        // countDistinctExitIps is the authority on this, and ignores retired
+        // nodes too, so the two numbers agree.
+        distinctIps: countDistinctExitIps(nodes),
+        retired: nodes.filter((node) => node.status === "retired").length,
+        cooling: nodes.filter((node) => node.status === "cooling").length,
+        core: { version, healthy: core.healthy() },
+      };
+    },
     // The core supervises itself with backoff and stops after five failures, so
     // there is nothing to restart from here: report the core's own reason.
     async restart() {

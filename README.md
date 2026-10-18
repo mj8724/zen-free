@@ -163,6 +163,23 @@ magpie plugin options opencode-zen-free-resin '{
      --subscription 'https://provider/sub?token=...' --max-nodes 8
    ```
    它会起真内核、发一次真实流式 completion、并列出每个节点测到的出口 IP。
+3. **magpie 的 Providers 页 / `magpie quota`**：账号那一行会显示池子的实时状态
+   ```
+   代理池节点      存活 12 / 共 167，失效 155
+   独立出口 IP     12 个
+   ```
+   每个数的口径：
+
+   | 数字 | 含义 |
+   |---|---|
+   | 共 N | 池子托管的节点数（去重、并受 `maxNodes` 限制之后） |
+   | 存活 | **真的测到过出口 IP** 的节点数 |
+   | 失效 | 共 − 存活（包括从没答过的，以及已退役的） |
+   | 独立出口 IP | 去重、去退役之后的**真实出口 IP** 个数 —— 这才是限流能分散到的宽度 |
+
+   内核没在跑的时候，第一行会附上 `（sing-box 1.14.3 未运行）`。那是一个**从节点数看不出来**的故障：请求全失败，而节点数看着一切正常。
+
+   > **为什么不做在插件自己的页面里**：magpie 不给插件页面任何数据通道。页面只能问四件事 —— `hello`、`options.get`、`options.set`、`read` —— 而 `read` 只允许 `providers:list` 和 `usage:summary`（见 magpie 的 `internal/gui/pluginpage.go`），页面的 CSP 又是 `connect-src 'none'`，连网络都没有。所以「账号的用量行」是插件唯一能被 UI 展示的状态出口，节点状态就放在那里。
 
 ## 局限
 

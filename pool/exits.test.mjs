@@ -1,4 +1,7 @@
 import assert from "node:assert/strict";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import test from "node:test";
 
 // The pool dials its nodes through a local HTTP proxy, and requireForwardSupport
@@ -17,6 +20,7 @@ import {
   withHeaderTimeout,
   reverseProxyURL,
 } from "./exits.mjs";
+import { emptyState, save } from "./state.mjs";
 
 const node = (id, zen, exitIp, extra = {}) => ({
   id,
@@ -163,6 +167,48 @@ bunTest("exits: with no core.binary the pool asks the provisioner to install one
   assert.equal(source.kind, "pool");
   assert.deepEqual(asked, [undefined], "a managed path must not be passed as if the user had configured it");
   await source.stop();
+});
+
+// What the account's usage row reports. The numbers have to mean "addresses the
+// pool can leave from", because that is the quantity the user is asking about:
+// a node that parsed but never answered, and a node that is retired for good,
+// are both in the subscription and neither is an exit.
+bunTest("exits: status counts the addresses the pool can actually leave from", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "zen-free-status-"));
+  const statePath = path.join(dir, "pool.json");
+  // Seeded the way a pool that has run before reloads: this is what its last
+  // measurements left behind, keyed by the same node ids the candidates have.
+  save(statePath, {
+    ...emptyState(),
+    nodes: [
+      { id: "a", lastExitIp: "1.1.1.1", status: "ready" },
+      { id: "b", lastExitIp: "2.2.2.2", status: "cooling" },
+      { id: "c", lastExitIp: "1.1.1.1", status: "ready" },
+      { id: "d", lastExitIp: "", status: "ready" },
+      { id: "e", lastExitIp: "3.3.3.3", status: "retired" },
+    ],
+  });
+
+  try {
+    const { deps } = poolDeps({ nodes: [node("a"), node("b"), node("c"), node("d"), node("e")] });
+    const source = await poolExitSource({ core: {}, statePath, probe: { timeoutMs: 50 }, attempts: 1 }, { deps });
+    const status = source.status();
+
+    assert.equal(status.total, 5, "every parsed node is a slot, usable or not");
+    assert.equal(status.alive, 3, "a, b and c answered; d never did and e is retired");
+    assert.equal(status.dead, 2);
+    assert.equal(status.distinctIps, 2, "1.1.1.1 twice is one address, and a retired node's address is not one");
+    assert.equal(status.cooling, 1);
+    assert.equal(status.retired, 1);
+    assert.equal(status.core.version, "1.14.3");
+    assert.equal(status.core.healthy, true);
+
+    // A read: asking again gives the same answer and measures nothing.
+    assert.deepEqual(source.status(), status);
+    await source.stop();
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 bunTest("exits: a core that would not run is reported, not loaded anyway", async () => {

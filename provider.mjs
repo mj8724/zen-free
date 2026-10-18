@@ -212,6 +212,51 @@ export function sessionID(headers, body) {
   return session;
 }
 
+// The pool's own numbers, where magpie will show them.
+//
+// An account's usage row is the only place magpie renders a plugin's status: a
+// plugin page can ask for nothing but its own options (pluginpage.go allows
+// hello, options.get, options.set and read, and read allows only providers:list
+// and usage:summary), so a page has no way to show live state at all.
+//
+// The windows are named for what they are rather than for a plan, because these
+// are not an allowance. `used` is a percentage, so it is set to the share of
+// the pool that has been proven usable — the same share the count beside it
+// shows — rather than to a share of some quota that does not exist here.
+// Counts stay in display and in amount/limit/unit, which is what a status
+// window needs and what a plan's allowance window also happens to use.
+export function poolWindows(exits) {
+  const status = typeof exits?.status === "function" ? exits.status() : null;
+  if (!status || !Number.isFinite(status.total) || status.total <= 0) return [];
+
+  const alivePercent = Math.round((status.alive / status.total) * 100);
+  const unhealthy = status.core?.healthy === false;
+  const windows = [
+    {
+      name: "代理池节点",
+      display: `存活 ${status.alive} / 共 ${status.total}，失效 ${status.dead}`,
+      amount: status.alive,
+      limit: status.total,
+      unit: "存活",
+      used: alivePercent,
+    },
+    {
+      name: "独立出口 IP",
+      display: `${status.distinctIps} 个`,
+      amount: status.distinctIps,
+      unit: "个",
+      used: status.total > 0 ? Math.round((status.distinctIps / status.total) * 100) : 0,
+    },
+  ];
+  // The core being down is the failure a user cannot otherwise see from here:
+  // every request fails and no address is spent, so the node counts look fine.
+  if (unhealthy) {
+    const version = status.core?.version ? ` ${status.core.version}` : "";
+    windows[0].display += `（sing-box${version} 未运行）`;
+  }
+  return windows;
+}
+
 // The plugin input is called _input because the loader's fetch below takes
 // an argument of its own called input.
 async function server(_input, options = {}) {
@@ -419,7 +464,11 @@ async function server(_input, options = {}) {
         };
       },
       async usage() {
-        return { plan: "OpenCode Zen Free", windows: [] };
+        // A read of the running pool, never a probe: this hook is asked for the
+        // account and must answer, because throwing here would mark the
+        // account as needing a sign-in. No pool configured means no node table,
+        // and an empty window list is the honest answer to that.
+        return { plan: "OpenCode Zen Free", windows: poolWindows(exits) };
       },
     },
     provider: {

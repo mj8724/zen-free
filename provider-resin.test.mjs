@@ -10,6 +10,8 @@ import { createServer } from "node:http";
 import { once } from "node:events";
 import test from "node:test";
 
+import { poolWindows } from "./provider.mjs";
+
 const subject = import("./index.mjs").then((module) => module.ZenFreePlugin);
 
 const ANSWER =
@@ -353,4 +355,57 @@ test("a Resin URL that cannot be used stops the plugin instead of going direct i
     () => load({ url: `${zen.origin}/t`, attempts: -1 }, zen.origin),
     /resin.attempts must be a whole number from 0 to 10/,
   );
+});
+
+// What the account's usage row says. It is the only place magpie renders a
+// plugin's own status: a plugin page can ask for nothing but its own options
+// (magpie's pluginpage.go allows hello, options.get, options.set and read, and
+// read allows only providers:list and usage:summary), so live pool state cannot
+// be shown on the plugin's own page at all.
+const poolStatus = (over = {}) => ({
+  status: () => ({
+    total: 167,
+    alive: 12,
+    dead: 155,
+    distinctIps: 12,
+    retired: 0,
+    cooling: 3,
+    core: { version: "1.14.3", healthy: true },
+    ...over,
+  }),
+});
+
+test("usage: the pool's numbers are reported where magpie shows them", () => {
+  const windows = poolWindows(poolStatus());
+  assert.equal(windows.length, 2);
+
+  const [nodes, ips] = windows;
+  assert.equal(nodes.name, "代理池节点");
+  assert.match(nodes.display, /存活 12 \/ 共 167/);
+  assert.match(nodes.display, /失效 155/);
+  assert.equal(nodes.amount, 12);
+  assert.equal(nodes.limit, 167);
+  assert.equal(nodes.unit, "存活");
+  // The percentage has to agree with the count beside it; a row reading "12 / 167"
+  // next to "93%" would look like a bug rather than a status.
+  assert.equal(nodes.used, 7);
+
+  assert.equal(ips.name, "独立出口 IP");
+  assert.equal(ips.amount, 12);
+  assert.equal(ips.display, "12 个");
+});
+
+test("usage: a core that is not running is said in the row", () => {
+  const windows = poolWindows(poolStatus({ core: { version: "1.14.3", healthy: false } }));
+  // Every request fails while the node counts still look fine, so this is the
+  // one failure that cannot be seen from the counts themselves.
+  assert.match(windows[0].display, /sing-box 1\.14\.3 未运行/);
+});
+
+test("usage: with no node table there is nothing to report, and no throw", () => {
+  // Throwing here would mark the account as needing a sign-in.
+  assert.deepEqual(poolWindows(undefined), []);
+  assert.deepEqual(poolWindows({ kind: "resin" }), []);
+  assert.deepEqual(poolWindows({ kind: "pool" }), [], "a pool that cannot report its status reports nothing");
+  assert.deepEqual(poolWindows(poolStatus({ total: 0, alive: 0, dead: 0, distinctIps: 0 })), []);
 });
